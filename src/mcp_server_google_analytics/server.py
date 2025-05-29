@@ -1,0 +1,622 @@
+"""
+Google Analytics MCP Server
+
+A Model Context Protocol server for Google Analytics Data API.
+Provides tools and resources for accessing GA4 data including reports,
+realtime data, and metadata.
+"""
+
+import os
+import json
+import logging
+from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta
+
+from google.analytics.data_v1beta import BetaAnalyticsDataClient
+from google.analytics.data_v1beta.types import (
+    RunReportRequest,
+    RunRealtimeReportRequest,
+    GetMetadataRequest,
+    DateRange,
+    Dimension,
+    Metric,
+    Filter,
+    FilterExpression,
+    NumericValue,
+    FilterExpressionList,
+)
+
+from google.analytics.admin_v1beta import AnalyticsAdminServiceClient
+from google.analytics.admin_v1beta.types import (
+    ListAccountSummariesRequest
+)  
+
+from google.oauth2 import service_account
+from google.api_core.exceptions import GoogleAPIError
+
+#from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize MCP server
+mcp = FastMCP("Google Analytics Server")
+
+# Global client instance
+analytics_client: Optional[BetaAnalyticsDataClient] = None
+admin_client: Optional[AnalyticsAdminServiceClient] = None
+default_property_id: Optional[str] = None
+
+
+def initialize_client():
+    """Initialize Google Analytics client with service account credentials."""
+    global analytics_client, admin_client, default_property_id
+    
+    try:
+        # Get environment variables
+        client_email = os.getenv("GOOGLE_CLIENT_EMAIL")
+        private_key = os.getenv("GOOGLE_PRIVATE_KEY")
+        property_id = os.getenv("GA_PROPERTY_ID")
+        
+        if not all([client_email, private_key, property_id]):
+            raise ValueError(
+                "Missing required environment variables: "
+                "GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY, GA_PROPERTY_ID"
+            )
+        
+        # Parse private key (handle escaped newlines)
+        private_key = private_key.replace("\\n", "\n")
+        
+        # Create service account credentials
+        credentials_info = {
+            "type": "service_account",
+            "client_email": client_email,
+            "private_key": private_key,
+            "private_key_id": "",
+            "client_id": "",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs"
+        }
+        
+        credentials = service_account.Credentials.from_service_account_info(
+            credentials_info,
+            scopes=["https://www.googleapis.com/auth/analytics.readonly"]
+        )
+        
+        # Initialize client
+        analytics_client = BetaAnalyticsDataClient(credentials=credentials)
+        admin_client = AnalyticsAdminServiceClient(credentials=credentials)
+        default_property_id = property_id
+        
+        logger.info("Google Analytics client initialized successfully")
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize Google Analytics client: {e}")
+        raise
+
+
+def format_property_id(property_id: str) -> str:
+    """Format property ID for API calls."""
+    if property_id.startswith("properties/"):
+        return property_id
+    return f"properties/{property_id}"
+
+
+def parse_date_string(date_str: str) -> str:
+    """Parse date string and convert to YYYY-MM-DD format."""
+    # Handle relative dates
+    if date_str.lower() in ["today", "yesterday"]:
+        if date_str.lower() == "today":
+            return datetime.now().strftime("%Y-%m-%d")
+        else:  # yesterday
+            return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    # Handle relative date patterns like "7daysAgo", "30daysAgo"
+    if date_str.lower().endswith("daysago"):
+        try:
+            days = int(date_str.lower().replace("daysago", ""))
+            return (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    
+    # Handle relative date patterns like "1monthAgo", "2monthsAgo"
+    if "month" in date_str.lower() and date_str.lower().endswith("ago"):
+        try:
+            months = int(date_str.lower().split("month")[0])
+            # Approximate months as 30 days each
+            return (datetime.now() - timedelta(days=months * 30)).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    
+    # Return as-is for absolute dates (assume already in correct format)
+    return date_str
+
+def build_filter_expression(filter_config: Dict[str, Any]) -> FilterExpression:
+    """
+    Build a FilterExpression from a configuration dictionary.
+    
+    Args:
+        filter_config: Dictionary containing filter configuration
+        
+    Returns:
+        FilterExpression object
+        
+    Example filter_config:
+    {
+        "filter": {
+            "field_name": "country",
+            "string_filter": {
+                "match_type": "EXACT",
+                "value": "United States"
+            }
+        }
+    }
+    
+    Or for complex filters:
+    {
+        "and_group": {
+            "expressions": [
+                {
+                    "filter": {
+                        "field_name": "country",
+                        "string_filter": {"match_type": "EXACT", "value": "United States"}
+                    }
+                },
+                {
+                    "filter": {
+                        "field_name": "activeUsers",
+                        "numeric_filter": {"operation": "GREATER_THAN", "value": {"int64_value": "100"}}
+                    }
+                }
+            ]
+        }
+    }
+    """
+    if "filter" in filter_config:
+        # Single filter
+        filter_data = filter_config["filter"]
+        filter_obj = Filter(field_name=filter_data["field_name"])
+        
+        if "string_filter" in filter_data:
+            string_filter_data = filter_data["string_filter"]
+            filter_obj.string_filter = Filter.StringFilter(
+                match_type=getattr(Filter.StringFilter.MatchType, string_filter_data.get("match_type", "EXACT")),
+                value=string_filter_data["value"],
+                case_sensitive=string_filter_data.get("case_sensitive", False)
+            )
+        elif "numeric_filter" in filter_data:
+            numeric_filter_data = filter_data["numeric_filter"]
+            numeric_value = NumericValue()
+            
+            if "int64_value" in numeric_filter_data["value"]:
+                numeric_value.int64_value = int(numeric_filter_data["value"]["int64_value"])
+            elif "double_value" in numeric_filter_data["value"]:
+                numeric_value.double_value = float(numeric_filter_data["value"]["double_value"])
+                
+            filter_obj.numeric_filter = Filter.NumericFilter(
+                operation=getattr(Filter.NumericFilter.Operation, numeric_filter_data["operation"]),
+                value=numeric_value
+            )
+        elif "between_filter" in filter_data:
+            between_filter_data = filter_data["between_filter"]
+            
+            from_value = NumericValue()
+            to_value = NumericValue()
+            
+            if "int64_value" in between_filter_data["from_value"]:
+                from_value.int64_value = int(between_filter_data["from_value"]["int64_value"])
+            elif "double_value" in between_filter_data["from_value"]:
+                from_value.double_value = float(between_filter_data["from_value"]["double_value"])
+                
+            if "int64_value" in between_filter_data["to_value"]:
+                to_value.int64_value = int(between_filter_data["to_value"]["int64_value"])
+            elif "double_value" in between_filter_data["to_value"]:
+                to_value.double_value = float(between_filter_data["to_value"]["double_value"])
+            
+            filter_obj.between_filter = Filter.BetweenFilter(
+                from_value=from_value,
+                to_value=to_value
+            )
+        elif "in_list_filter" in filter_data:
+            in_list_filter_data = filter_data["in_list_filter"]
+            filter_obj.in_list_filter = Filter.InListFilter(
+                values=in_list_filter_data["values"],
+                case_sensitive=in_list_filter_data.get("case_sensitive", False)
+            )
+        
+        return FilterExpression(filter=filter_obj)
+    
+    elif "and_group" in filter_config:
+        # AND group of filters
+        expressions = []
+        for expr_config in filter_config["and_group"]["expressions"]:
+            expressions.append(build_filter_expression(expr_config))
+        
+        return FilterExpression(
+            and_group=FilterExpressionList(expressions=expressions)
+        )
+    
+    elif "or_group" in filter_config:
+        # OR group of filters
+        expressions = []
+        for expr_config in filter_config["or_group"]["expressions"]:
+            expressions.append(build_filter_expression(expr_config))
+        
+        return FilterExpression(
+            or_group=FilterExpressionList(expressions=expressions)
+        )
+    
+    elif "not_expression" in filter_config:
+        # NOT expression
+        return FilterExpression(
+            not_expression=build_filter_expression(filter_config["not_expression"])
+        )
+    
+    else:
+        raise ValueError(f"Invalid filter configuration: {filter_config}")
+
+
+@mcp.tool()
+def get_report(
+    start_date: str,
+    end_date: str,
+    metrics: List[str],
+    dimensions: Optional[List[str]] = None,
+    dimension_filter: Optional[Dict[str, Any]] = None,
+    metric_filter: Optional[Dict[str, Any]] = None,
+    property_id: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None
+) -> str:
+    """
+    Get a Google Analytics report for the specified date range, metrics, and dimensions.
+    
+    Args:
+        start_date: Start date in YYYY-MM-DD format or relative format (e.g., "7daysAgo", "today")
+        end_date: End date in YYYY-MM-DD format or relative format (e.g., "today", "yesterday")
+        metrics: List of metric names (e.g., ["activeUsers", "screenPageViews"])
+        dimensions: Optional list of dimension names (e.g., ["date", "country"])
+        dimension_filter: Optional dimension filter configuration
+        metric_filter: Optional metric filter configuration
+        property_id: Optional GA4 property ID (uses default if not provided)
+        limit: Optional limit on number of rows returned
+        offset: Optional offset for pagination
+
+    Example dimension_filter:
+    {
+        "filter": {
+            "field_name": "country",
+            "string_filter": {
+                "match_type": "EXACT",
+                "value": "United States"
+            }
+        }
+    }
+    
+    Example metric_filter:
+    {
+        "filter": {
+            "field_name": "activeUsers", 
+            "numeric_filter": {
+                "operation": "GREATER_THAN",
+                "value": {"int64_value": "100"}
+            }
+        }
+    }
+    
+    Returns:
+        JSON string containing the report data
+    """
+    if not analytics_client:
+        return json.dumps({"error": "Google Analytics client not initialized"})
+    
+    try:
+        # Use default property ID if not provided
+        prop_id = property_id or default_property_id
+        if not prop_id:
+            return json.dumps({"error": "No property ID provided"})
+        
+        # Parse dates
+        parsed_start = parse_date_string(start_date)
+        parsed_end = parse_date_string(end_date)
+        
+        # Build date ranges
+        date_ranges = [DateRange(start_date=parsed_start, end_date=parsed_end)]
+        
+        # Build metrics
+        metric_objs = [Metric(name=metric) for metric in metrics]
+        
+        # Build dimensions
+        dimension_objs = []
+        if dimensions:
+            dimension_objs = [Dimension(name=dim) for dim in dimensions]
+
+        # Build filters
+        dimension_filter_obj = None
+        if dimension_filter:
+            dimension_filter_obj = build_filter_expression(dimension_filter)
+            
+        metric_filter_obj = None
+        if metric_filter:
+            metric_filter_obj = build_filter_expression(metric_filter)
+        
+        # Create request
+        request = RunReportRequest(
+            property=format_property_id(prop_id),
+            date_ranges=date_ranges,
+            metrics=metric_objs,
+            dimensions=dimension_objs,
+            dimension_filter=dimension_filter_obj,
+            metric_filter=metric_filter_obj,
+            limit=limit,
+            offset=offset
+        )
+        
+        # Run report
+        response = analytics_client.run_report(request=request)
+        
+        # Format response
+        result = {
+            "date_ranges": [{"start_date": parsed_start, "end_date": parsed_end}],
+            "metrics_headers": [{"name": metric.name} for metric in response.metric_headers],
+            "dimension_headers": [{"name": dim.name} for dim in response.dimension_headers],
+            "rows": [],
+            "row_count": response.row_count,
+            "metadata": {
+                "currency_code": response.metadata.currency_code if response.metadata else None,
+                "time_zone": response.metadata.time_zone if response.metadata else None
+            }
+        }
+        
+        # Process rows
+        for row in response.rows:
+            row_data = {
+                "dimensions": [dim_value.value for dim_value in row.dimension_values],
+                "metrics": [metric_value.value for metric_value in row.metric_values]
+            }
+            result["rows"].append(row_data)
+        
+        return json.dumps(result, indent=2)
+        
+    except GoogleAPIError as e:
+        logger.error(f"Google API error: {e}")
+        return json.dumps({"error": f"Google API error: {str(e)}"})
+    except Exception as e:
+        logger.error(f"Error getting report: {e}")
+        return json.dumps({"error": f"Error getting report: {str(e)}"})
+
+
+@mcp.tool()
+def get_realtime_data(
+    metrics: List[str],
+    dimensions: Optional[List[str]] = None,
+    property_id: Optional[str] = None,
+    limit: Optional[int] = None
+) -> str:
+    """
+    Get real-time Google Analytics data.
+    
+    Args:
+        metrics: List of metric names (e.g., ["activeUsers"])
+        dimensions: Optional list of dimension names (e.g., ["deviceCategory"])
+        property_id: Optional GA4 property ID (uses default if not provided)
+        limit: Optional limit on number of rows returned
+    
+    Returns:
+        JSON string containing the real-time data
+    """
+    if not analytics_client:
+        return json.dumps({"error": "Google Analytics client not initialized"})
+    
+    try:
+        # Use default property ID if not provided
+        prop_id = property_id or default_property_id
+        if not prop_id:
+            return json.dumps({"error": "No property ID provided"})
+        
+        # Build metrics
+        metric_objs = [Metric(name=metric) for metric in metrics]
+        
+        # Build dimensions
+        dimension_objs = []
+        if dimensions:
+            dimension_objs = [Dimension(name=dim) for dim in dimensions]
+        
+        # Create request
+        request = RunRealtimeReportRequest(
+            property=format_property_id(prop_id),
+            metrics=metric_objs,
+            dimensions=dimension_objs,
+            limit=limit
+        )
+        
+        # Run realtime report
+        response = analytics_client.run_realtime_report(request=request)
+        
+        # Format response
+        result = {
+            "metrics_headers": [{"name": metric.name} for metric in response.metric_headers],
+            "dimension_headers": [{"name": dim.name} for dim in response.dimension_headers],
+            "rows": [],
+            "row_count": response.row_count
+        }
+        
+        # Process rows
+        for row in response.rows:
+            row_data = {
+                "dimensions": [dim_value.value for dim_value in row.dimension_values],
+                "metrics": [metric_value.value for metric_value in row.metric_values]
+            }
+            result["rows"].append(row_data)
+        
+        return json.dumps(result, indent=2)
+        
+    except GoogleAPIError as e:
+        logger.error(f"Google API error: {e}")
+        return json.dumps({"error": f"Google API error: {str(e)}"})
+    except Exception as e:
+        logger.error(f"Error getting realtime data: {e}")
+        return json.dumps({"error": f"Error getting realtime data: {str(e)}"})
+
+## Access metadata as tool and resource (default property)
+async def get_property_metadata(property_id: str) -> str:
+    """
+    Get metadata for a Google Analytics property including available metrics and dimensions.
+    
+    Args:
+        property_id: GA4 property ID
+    
+    Returns:
+        JSON string containing property metadata
+    """
+    if not analytics_client:
+        return json.dumps({"error": "Google Analytics client not initialized"})
+    
+    try:
+        # Create request
+        request = GetMetadataRequest(
+            name=f"{format_property_id(property_id)}/metadata"
+        )
+        
+        # Get metadata
+        response = analytics_client.get_metadata(request=request)
+        
+        # Format response
+        result = {
+            "property_id": property_id,
+            "metrics": [],
+            "dimensions": []
+        }
+        
+        # Process metrics
+        for metric in response.metrics:
+            metric_data = {
+                "api_name": metric.api_name,
+                "ui_name": metric.ui_name,
+                "description": metric.description,
+                "type": metric.type_.name if metric.type_ else None,
+                "category": metric.category
+            }
+            result["metrics"].append(metric_data)
+        
+        # Process dimensions
+        for dimension in response.dimensions:
+            dimension_data = {
+                "api_name": dimension.api_name,
+                "ui_name": dimension.ui_name,
+                "description": dimension.description,
+                "category": dimension.category
+            }
+            result["dimensions"].append(dimension_data)
+        
+        return json.dumps(result, indent=2)
+        
+    except GoogleAPIError as e:
+        logger.error(f"Google API error: {e}")
+        return json.dumps({"error": f"Google API error: {str(e)}"})
+    except Exception as e:
+        logger.error(f"Error getting metadata: {e}")
+        return json.dumps({"error": f"Error getting metadata: {str(e)}"})
+
+
+@mcp.tool()
+async def get_metadata_tool(property_id: str) -> str:
+    """
+    Get metadata for a Google Analytics property including available metrics and dimensions.
+    
+    Args:
+        property_id: GA4 property ID
+    
+    Returns:
+        JSON string containing property metadata
+    """
+    return await get_property_metadata(property_id)
+
+@mcp.resource("ga4://default/metadata")
+async def get_default_metadata() -> str:
+    """Get metadata for the default Google Analytics property."""
+    if not default_property_id:
+        return json.dumps({"error": "No default property ID configured"})
+    
+    return await get_property_metadata(default_property_id)
+
+# NOTE: RESOURCE TEMPLATES ARE CURRENTLY NOT SUPPORTED ON CLAUDE DESKTOP
+@mcp.resource("ga4://{property_id}/metadata")
+async def get_specific_metadata(property_id: str) -> str:
+    """Get metadata for the default Google Analytics property."""
+    if not property_id:
+        return json.dumps({"error": "No property ID configured"})
+    
+    return await get_property_metadata(property_id)
+
+@mcp.resource("ga4://properties/list")
+async def get_properties_list() -> str:
+    """List all available GA4 properties."""
+    
+    if not admin_client:
+        return json.dumps({"error": "Google Analytics client not initialized"})
+    
+    try:
+        # Initialize request for account summaries
+        request = ListAccountSummariesRequest()
+        
+        # Make the request to get account summaries (includes properties)
+        page_result = admin_client.list_account_summaries(request=request)
+        
+        all_properties = []
+        
+        # Handle the response - each account summary contains property summaries
+        for account_summary in page_result:
+            account_id = account_summary.account.split('/')[-1]  # Extract account ID
+            account_name = account_summary.display_name
+            
+            # Iterate through property summaries for this account
+            for property_summary in account_summary.property_summaries:
+                property_id = property_summary.property.split('/')[-1]  # Extract property ID
+                
+                property_info = {
+                    "id": property_id,
+                    "name": property_summary.display_name,
+                    "resource_name": property_summary.property,
+                    "account_name": account_name,
+                    "account_id": account_id,
+                    "account_resource_name": account_summary.account,
+                    "property_type": property_summary.property_type.name if property_summary.property_type else None,
+                    "parent": property_summary.parent if hasattr(property_summary, 'parent') else None
+                }
+                
+                all_properties.append(property_info)
+        
+        return json.dumps({
+            "properties": all_properties,
+            "total_count": len(all_properties)
+        }, indent=2)
+        
+    except Exception as e:
+        return json.dumps({
+            "error": f"Failed to list GA4 properties: {str(e)}"
+        })
+    
+
+def main():
+    """Main entry point for the MCP server."""
+    try:
+        # Initialize Google Analytics client
+        initialize_client()
+        
+        # Start the MCP server
+        logger.info("Starting Google Analytics MCP Server...")
+        mcp.run()
+        
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
+    except Exception as e:
+        logger.error(f"Server error: {e}")
+        raise
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,10 @@
+{
+    "mcpServers": {
+        "google-analytics": {
+            "command": "/Users/gunnargriese/Desktop/python3/mcp-server-google-analytics/venv/bin/python3",
+            "args": [
+                "/Users/gunnargriese/Desktop/python3/mcp-server-google-analytics/run_local.py"
+            ]
+        }
+    }
+}

@@ -1,3 +1,4 @@
+*.pyc
 claude-config-with-credentials.json
 nlp-api-test-260216-2dee690597bc.json
 /venv/
