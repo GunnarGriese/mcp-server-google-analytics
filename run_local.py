@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 try:
     from mcp_server_google_analytics.server import main
+    #from mcp_server_google_analytics.main import main
     print("Successfully imported main function", file=sys.stderr)
 except ImportError as e:
     print(f"Import error: {e}", file=sys.stderr)

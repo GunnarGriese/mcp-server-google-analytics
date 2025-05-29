@@ -9,7 +9,7 @@ realtime data, and metadata.
 import os
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from datetime import datetime, timedelta
 
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
@@ -133,6 +133,111 @@ def parse_date_string(date_str: str) -> str:
     
     # Return as-is for absolute dates (assume already in correct format)
     return date_str
+
+def preprocess_list_param(param: Union[List[str], str, None]) -> Optional[List[str]]:
+    """
+    Preprocess a parameter that should be a list but might come as a JSON string.
+    
+    Args:
+        param: The parameter that might be a list, JSON string, or None
+        
+    Returns:
+        A proper list or None
+    """
+    if param is None:
+        return None
+    
+    if isinstance(param, list):
+        return param
+    
+    if isinstance(param, str):
+        try:
+            # Try to parse as JSON
+            parsed = json.loads(param)
+            if isinstance(parsed, list):
+                return parsed
+            else:
+                # If it's a single string value, wrap it in a list
+                return [param]
+        except json.JSONDecodeError:
+            # If JSON parsing fails, treat it as a single string value
+            return [param]
+    
+    return None
+
+def preprocess_dict_param(param: Union[Dict[str, Any], str, None]) -> Optional[Dict[str, Any]]:
+    """
+    Preprocess a parameter that should be a dict but might come as a JSON string.
+    
+    Args:
+        param: The parameter that might be a dict, JSON string, or None
+        
+    Returns:
+        A proper dict or None
+    """
+    if param is None:
+        return None
+    
+    if isinstance(param, dict):
+        return param
+    
+    if isinstance(param, str):
+        try:
+            # Try to parse as JSON
+            parsed = json.loads(param)
+            if isinstance(parsed, dict):
+                return parsed
+            else:
+                raise ValueError(f"Expected dict but got {type(parsed)}")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON string for filter parameter: {e}")
+    
+    raise ValueError(f"Filter parameter must be dict or JSON string, got {type(param)}")
+
+def normalize_filter_keys(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize filter keys to match Google Analytics API expectations.
+    Converts camelCase to snake_case for common field names.
+    """
+    if not isinstance(data, dict):
+        return data
+    
+    # Key mappings from camelCase to snake_case
+    key_mappings = {
+        'fieldName': 'field_name',
+        'matchType': 'match_type',
+        'caseSensitive': 'case_sensitive',
+        'int64Value': 'int64_value',
+        'doubleValue': 'double_value',
+        'fromValue': 'from_value',
+        'toValue': 'to_value',
+        'stringFilter': 'string_filter',
+        'numericFilter': 'numeric_filter',
+        'betweenFilter': 'between_filter',
+        'inListFilter': 'in_list_filter',
+        'andGroup': 'and_group',
+        'orGroup': 'or_group',
+        'notExpression': 'not_expression'
+    }
+    
+    normalized = {}
+    for key, value in data.items():
+        # Map the key if it exists in our mappings
+        new_key = key_mappings.get(key, key)
+        
+        # Recursively normalize nested dictionaries
+        if isinstance(value, dict):
+            normalized[new_key] = normalize_filter_keys(value)
+        elif isinstance(value, list):
+            # Handle lists that might contain dictionaries
+            normalized[new_key] = [
+                normalize_filter_keys(item) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            normalized[new_key] = value
+    
+    return normalized
 
 def build_filter_expression(filter_config: Dict[str, Any]) -> FilterExpression:
     """
@@ -263,10 +368,10 @@ def build_filter_expression(filter_config: Dict[str, Any]) -> FilterExpression:
 def get_report(
     start_date: str,
     end_date: str,
-    metrics: List[str],
-    dimensions: Optional[List[str]] = None,
-    dimension_filter: Optional[Dict[str, Any]] = None,
-    metric_filter: Optional[Dict[str, Any]] = None,
+    metrics: Union[List[str], str],
+    dimensions: Union[List[str], str, None] = None,
+    dimension_filter: Union[Dict[str, Any], str, None] = None,  # Allow both types
+    metric_filter: Union[Dict[str, Any], str, None] = None,     # Allow both types
     property_id: Optional[str] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None
@@ -277,36 +382,14 @@ def get_report(
     Args:
         start_date: Start date in YYYY-MM-DD format or relative format (e.g., "7daysAgo", "today")
         end_date: End date in YYYY-MM-DD format or relative format (e.g., "today", "yesterday")
-        metrics: List of metric names (e.g., ["activeUsers", "screenPageViews"])
-        dimensions: Optional list of dimension names (e.g., ["date", "country"])
-        dimension_filter: Optional dimension filter configuration
-        metric_filter: Optional metric filter configuration
+        metrics: List of metric names (e.g., ["activeUsers", "screenPageViews"]) or JSON string
+        dimensions: Optional list of dimension names (e.g., ["date", "country"]) or JSON string
+        dimension_filter: Optional dimension filter configuration or JSON string
+        metric_filter: Optional metric filter configuration or JSON string
         property_id: Optional GA4 property ID (uses default if not provided)
         limit: Optional limit on number of rows returned
         offset: Optional offset for pagination
 
-    Example dimension_filter:
-    {
-        "filter": {
-            "field_name": "country",
-            "string_filter": {
-                "match_type": "EXACT",
-                "value": "United States"
-            }
-        }
-    }
-    
-    Example metric_filter:
-    {
-        "filter": {
-            "field_name": "activeUsers", 
-            "numeric_filter": {
-                "operation": "GREATER_THAN",
-                "value": {"int64_value": "100"}
-            }
-        }
-    }
-    
     Returns:
         JSON string containing the report data
     """
@@ -314,6 +397,15 @@ def get_report(
         return json.dumps({"error": "Google Analytics client not initialized"})
     
     try:
+        # Preprocess all parameters
+        processed_metrics = preprocess_list_param(metrics)
+        processed_dimensions = preprocess_list_param(dimensions)
+        processed_dimension_filter = preprocess_dict_param(dimension_filter)
+        processed_metric_filter = preprocess_dict_param(metric_filter)
+        
+        if not processed_metrics:
+            return json.dumps({"error": "Metrics parameter is required and must be a valid list"})
+        
         # Use default property ID if not provided
         prop_id = property_id or default_property_id
         if not prop_id:
@@ -327,21 +419,21 @@ def get_report(
         date_ranges = [DateRange(start_date=parsed_start, end_date=parsed_end)]
         
         # Build metrics
-        metric_objs = [Metric(name=metric) for metric in metrics]
+        metric_objs = [Metric(name=metric) for metric in processed_metrics]
         
         # Build dimensions
         dimension_objs = []
-        if dimensions:
-            dimension_objs = [Dimension(name=dim) for dim in dimensions]
+        if processed_dimensions:
+            dimension_objs = [Dimension(name=dim) for dim in processed_dimensions]
 
         # Build filters
         dimension_filter_obj = None
-        if dimension_filter:
-            dimension_filter_obj = build_filter_expression(dimension_filter)
+        if processed_dimension_filter:
+            dimension_filter_obj = build_filter_expression(processed_dimension_filter)
             
         metric_filter_obj = None
-        if metric_filter:
-            metric_filter_obj = build_filter_expression(metric_filter)
+        if processed_metric_filter:
+            metric_filter_obj = build_filter_expression(processed_metric_filter)
         
         # Create request
         request = RunReportRequest(
@@ -391,8 +483,8 @@ def get_report(
 
 @mcp.tool()
 def get_realtime_data(
-    metrics: List[str],
-    dimensions: Optional[List[str]] = None,
+    metrics: Union[List[str], str],  # Allow both types
+    dimensions: Union[List[str], str, None] = None,  # Allow both types
     property_id: Optional[str] = None,
     limit: Optional[int] = None
 ) -> str:
@@ -400,8 +492,8 @@ def get_realtime_data(
     Get real-time Google Analytics data.
     
     Args:
-        metrics: List of metric names (e.g., ["activeUsers"])
-        dimensions: Optional list of dimension names (e.g., ["deviceCategory"])
+        metrics: List of metric names (e.g., ["activeUsers"]) or JSON string
+        dimensions: Optional list of dimension names (e.g., ["deviceCategory"]) or JSON string
         property_id: Optional GA4 property ID (uses default if not provided)
         limit: Optional limit on number of rows returned
     
@@ -412,18 +504,25 @@ def get_realtime_data(
         return json.dumps({"error": "Google Analytics client not initialized"})
     
     try:
+        # Preprocess list parameters
+        processed_metrics = preprocess_list_param(metrics)
+        processed_dimensions = preprocess_list_param(dimensions)
+        
+        if not processed_metrics:
+            return json.dumps({"error": "Metrics parameter is required and must be a valid list"})
+        
         # Use default property ID if not provided
         prop_id = property_id or default_property_id
         if not prop_id:
             return json.dumps({"error": "No property ID provided"})
         
         # Build metrics
-        metric_objs = [Metric(name=metric) for metric in metrics]
+        metric_objs = [Metric(name=metric) for metric in processed_metrics]
         
         # Build dimensions
         dimension_objs = []
-        if dimensions:
-            dimension_objs = [Dimension(name=dim) for dim in dimensions]
+        if processed_dimensions:
+            dimension_objs = [Dimension(name=dim) for dim in processed_dimensions]
         
         # Create request
         request = RunRealtimeReportRequest(
