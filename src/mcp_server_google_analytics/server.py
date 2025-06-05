@@ -28,8 +28,12 @@ from google.analytics.data_v1beta.types import (
 
 from google.analytics.admin_v1beta import AnalyticsAdminServiceClient
 from google.analytics.admin_v1beta.types import (
-    ListAccountSummariesRequest
-)  
+    ListAccountSummariesRequest,
+    Property, 
+    CreatePropertyRequest,
+    DataStream,
+    CreateDataStreamRequest,
+)
 
 from google.oauth2 import service_account
 from google.api_core.exceptions import GoogleAPIError
@@ -49,6 +53,9 @@ analytics_client: Optional[BetaAnalyticsDataClient] = None
 admin_client: Optional[AnalyticsAdminServiceClient] = None
 default_property_id: Optional[str] = None
 
+##
+## AUTHORIZATION
+##
 
 def initialize_client():
     """Initialize Google Analytics client with service account credentials."""
@@ -83,7 +90,10 @@ def initialize_client():
         
         credentials = service_account.Credentials.from_service_account_info(
             credentials_info,
-            scopes=["https://www.googleapis.com/auth/analytics.readonly"]
+            scopes=[
+                "https://www.googleapis.com/auth/analytics.readonly", 
+                "https://www.googleapis.com/auth/analytics.edit"
+            ]
         )
         
         # Initialize client
@@ -97,6 +107,15 @@ def initialize_client():
         logger.error(f"Failed to initialize Google Analytics client: {e}")
         raise
 
+## 
+## TOOLS AND RESOURCES
+##
+
+def format_parent_id(parent_id: str) -> str:
+    """Format property ID for API calls."""
+    if parent_id.startswith("accounts/"):
+        return parent_id
+    return f"accounts/{parent_id}"
 
 def format_property_id(property_id: str) -> str:
     """Format property ID for API calls."""
@@ -363,6 +382,9 @@ def build_filter_expression(filter_config: Dict[str, Any]) -> FilterExpression:
     else:
         raise ValueError(f"Invalid filter configuration: {filter_config}")
 
+## 
+## DATA API TOOLS
+##
 
 @mcp.tool()
 def get_report(
@@ -634,6 +656,10 @@ async def get_metadata_tool(property_id: str) -> str:
     """
     return await get_property_metadata(property_id)
 
+##
+## DATA API RESOURCES
+##
+
 @mcp.resource("ga4://default/metadata")
 async def get_default_metadata() -> str:
     """Get metadata for the default Google Analytics property."""
@@ -698,7 +724,150 @@ async def get_properties_list() -> str:
         return json.dumps({
             "error": f"Failed to list GA4 properties: {str(e)}"
         })
+
+
+## 
+## ADMIN API TOOLS
+##
+@mcp.tool()
+def create_property(
+    display_name: str,
+    time_zone: str,
+    parent: str,
+    currency_code: Optional[str] = None,
+    industry_category: Optional[str] = None,
+) -> str:
+    """
+    Create a new Google Analytics 4 property.
     
+    Args:
+        display_name: Human-readable display name for the property
+        time_zone: Time zone for the property (e.g., "America/Los_Angeles", "UTC")
+        currency_code: Optional currency code for the property (e.g., "USD", "EUR")
+        industry_category: Optional industry category (e.g., "AUTOMOTIVE", "BUSINESS_AND_INDUSTRIAL_MARKETS")
+        parent: Optional parent account in format "accounts/{account_id}" (uses default account if not provided)
+    
+    Returns:
+        JSON string containing the created property information
+    """
+    if not admin_client:
+        return json.dumps({"error": "Google Analytics admin client not initialized"})
+    
+    try:
+        
+        # Create property object
+        property_obj = Property()
+        property_obj.display_name = display_name
+        property_obj.time_zone = time_zone
+        property_obj.parent = format_parent_id(parent)
+        
+        
+        if currency_code:
+            property_obj.currency_code = currency_code
+        
+        if industry_category:
+            # Convert string to enum if needed
+            property_obj.industry_category = getattr(Property.IndustryCategory, industry_category, industry_category)
+        
+        # Create request
+        request = CreatePropertyRequest(
+            property=property_obj
+        )
+        
+        # Make the request
+        response = admin_client.create_property(request=request)
+        
+        # Format response
+        result = {
+            "property_id": response.name.split('/')[-1],
+            "resource_name": response.name,
+            "display_name": response.display_name,
+            "time_zone": response.time_zone,
+            "currency_code": response.currency_code,
+            "industry_category": response.industry_category.name if response.industry_category else None,
+            "create_time": response.create_time.isoformat() if response.create_time else None,
+            "update_time": response.update_time.isoformat() if response.update_time else None,
+            "parent": response.parent,
+            "delete_time": response.delete_time.isoformat() if response.delete_time else None,
+            "expire_time": response.expire_time.isoformat() if response.expire_time else None
+        }
+        
+        return json.dumps(result, indent=2)
+        
+    except GoogleAPIError as e:
+        logger.error(f"Google API error: {e}")
+        return json.dumps({"error": f"Google API error: {str(e)}"})
+    except Exception as e:
+        logger.error(f"Error creating property: {e}")
+        return json.dumps({"error": f"Error creating property: {str(e)}"})
+    
+@mcp.tool()
+def create_data_stream(
+    parent_property_id: str,
+    display_name: str,
+    default_uri: str
+) -> str:
+    """
+    Create a new web data stream for a Google Analytics 4 property.
+    
+    Args:
+        parent_property_id: GA4 property ID where the data stream will be created
+        display_name: Human-readable display name for the data stream
+        default_uri: Default URI for the web stream (e.g., "https://example.com")
+    
+    Returns:
+        JSON string containing the created data stream information
+    """
+    if not admin_client:
+        return json.dumps({"error": "Google Analytics admin client not initialized"})
+    
+    try:
+        from google.analytics import admin_v1beta
+        
+        # Create data stream object
+        data_stream = admin_v1beta.DataStream()
+        data_stream.display_name = display_name
+        data_stream.type_ = "WEB_DATA_STREAM"
+        
+        # Set web stream data
+        data_stream.web_stream_data = admin_v1beta.DataStream.WebStreamData()
+        data_stream.web_stream_data.default_uri = default_uri
+        
+        # Create request
+        request = admin_v1beta.CreateDataStreamRequest(
+            parent=format_property_id(parent_property_id),
+            data_stream=data_stream
+        )
+        
+        # Make the request
+        response = admin_client.create_data_stream(request=request)
+        
+        # Format response
+        result = {
+            "data_stream_id": response.name.split('/')[-1],
+            "resource_name": response.name,
+            "display_name": response.display_name,
+            "type": response.type_,
+            "create_time": response.create_time.isoformat() if response.create_time else None,
+            "update_time": response.update_time.isoformat() if response.update_time else None
+        }
+        
+        # Add web stream data
+        if response.web_stream_data:
+            result["web_stream_data"] = {
+                "measurement_id": response.web_stream_data.measurement_id,
+                "firebase_app_id": response.web_stream_data.firebase_app_id,
+                "default_uri": response.web_stream_data.default_uri
+            }
+        
+        return json.dumps(result, indent=2)
+        
+    except GoogleAPIError as e:
+        logger.error(f"Google API error: {e}")
+        return json.dumps({"error": f"Google API error: {str(e)}"})
+    except Exception as e:
+        logger.error(f"Error creating data stream: {e}")
+        return json.dumps({"error": f"Error creating data stream: {str(e)}"})
 
 def main():
     """Main entry point for the MCP server."""
@@ -715,7 +884,6 @@ def main():
     except Exception as e:
         logger.error(f"Server error: {e}")
         raise
-
 
 if __name__ == "__main__":
     main()
