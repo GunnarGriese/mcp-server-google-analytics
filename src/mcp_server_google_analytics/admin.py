@@ -29,7 +29,7 @@ async def get_account_summaries() -> str:
         return json.dumps({"error": "Google Analytics admin client not initialized"})
     
     try:
-        from google.analytics.admin_v1beta.types import ListAccountSummariesRequest
+        from google.analytics.admin_v1alpha.types import ListAccountSummariesRequest
         
         # Initialize request for account summaries
         request = ListAccountSummariesRequest()
@@ -87,7 +87,7 @@ async def get_property_details(property_id: str) -> str:
         return json.dumps({"error": "Google Analytics admin client not initialized"})
     
     try:
-        from google.analytics.admin_v1beta.types import GetPropertyRequest
+        from google.analytics.admin_v1alpha.types import GetPropertyRequest
         
         # Create request for property details
         request = GetPropertyRequest(
@@ -135,7 +135,7 @@ async def list_google_ads_links(property_id: str) -> str:
         return json.dumps({"error": "Google Analytics admin client not initialized"})
     
     try:
-        from google.analytics.admin_v1beta.types import ListGoogleAdsLinksRequest
+        from google.analytics.admin_v1alpha.types import ListGoogleAdsLinksRequest
         
         # Create request for Google Ads links
         request = ListGoogleAdsLinksRequest(
@@ -187,7 +187,7 @@ async def list_data_streams(property_id: str) -> str:
         return json.dumps({"error": "Google Analytics admin client not initialized"})
     
     try:
-        from google.analytics.admin_v1beta.types import ListDataStreamsRequest
+        from google.analytics.admin_v1alpha.types import ListDataStreamsRequest
         
         # Create request for data streams
         request = ListDataStreamsRequest(
@@ -271,7 +271,7 @@ async def create_property(
         return json.dumps({"error": "Google Analytics admin client not initialized"})
     
     try:
-        from google.analytics.admin_v1beta.types import Property, CreatePropertyRequest
+        from google.analytics.admin_v1alpha.types import Property, CreatePropertyRequest
         
         # Create property object
         property_obj = Property()
@@ -338,16 +338,16 @@ async def create_data_stream(
         return json.dumps({"error": "Google Analytics admin client not initialized"})
     
     try:
-        from google.analytics import admin_v1beta
-        from google.analytics.admin_v1beta.types import CreateDataStreamRequest
+        from google.analytics import admin_v1alpha
+        from google.analytics.admin_v1alpha.types import CreateDataStreamRequest
         
         # Create data stream object
-        data_stream = admin_v1beta.DataStream()
+        data_stream = admin_v1alpha.DataStream()
         data_stream.display_name = display_name
         data_stream.type_ = "WEB_DATA_STREAM"
         
         # Set web stream data
-        data_stream.web_stream_data = admin_v1beta.DataStream.WebStreamData()
+        data_stream.web_stream_data = admin_v1alpha.DataStream.WebStreamData()
         data_stream.web_stream_data.default_uri = default_uri
         
         # Create request
@@ -383,3 +383,148 @@ async def create_data_stream(
     except Exception as e:
         logger.error(f"Error creating data stream: {e}")
         return json.dumps({"error": f"Error creating data stream: {str(e)}"})
+
+
+@mcp.tool()
+async def update_enhanced_measurement_settings(
+    property_id: str,
+    data_stream_id: str,
+    stream_enabled: Optional[bool] = None,
+    scrolls_enabled: Optional[bool] = None,
+    outbound_clicks_enabled: Optional[bool] = None,
+    site_search_enabled: Optional[bool] = None,
+    video_engagement_enabled: Optional[bool] = None,
+    file_downloads_enabled: Optional[bool] = None,
+    page_changes_enabled: Optional[bool] = None,
+    form_interactions_enabled: Optional[bool] = None,
+    search_query_parameter: Optional[str] = None,
+    uri_query_parameter: Optional[str] = None
+) -> str:
+    """
+    Update enhanced measurement settings for a Google Analytics 4 data stream.
+    
+    Enhanced measurement automatically tracks interactions on a web data stream.
+    Note: The stream must enable enhanced measurement for these settings to take effect.
+    
+    Args:
+        property_id: GA4 property ID
+        data_stream_id: Data stream ID
+        stream_enabled: Whether enhanced measurement is active
+        scrolls_enabled: Capture scroll events when reaching page bottom
+        outbound_clicks_enabled: Track clicks leading away from your domain
+        site_search_enabled: Record site search result views
+        video_engagement_enabled: Capture video play, progress, and completion events
+        file_downloads_enabled: Track downloads of document, compressed, audio/video files
+        page_changes_enabled: Measure browser history state changes
+        form_interactions_enabled: Record form interaction events
+        search_query_parameter: URL parameters for interpreting site search
+        uri_query_parameter: Additional URL query parameters
+    
+    Returns:
+        JSON string containing the updated enhanced measurement settings
+    """
+    if not utils.admin_client:
+        return json.dumps({"error": "Google Analytics admin client not initialized"})
+    
+    try:
+        from google.analytics.admin_v1alpha.types import (
+            UpdateEnhancedMeasurementSettingsRequest,
+            EnhancedMeasurementSettings
+        )
+        from google.protobuf.field_mask_pb2 import FieldMask
+        
+        # Build the resource name
+        resource_name = f"properties/{property_id}/dataStreams/{data_stream_id}/enhancedMeasurementSettings"
+        
+        # Create enhanced measurement settings object
+        settings = EnhancedMeasurementSettings()
+        settings.name = resource_name
+        
+        # List of fields to update
+        update_fields = []
+        
+        # Set each field if provided
+        if stream_enabled is not None:
+            settings.stream_enabled = stream_enabled
+            update_fields.append("stream_enabled")
+            
+        if scrolls_enabled is not None:
+            settings.scrolls_enabled = scrolls_enabled
+            update_fields.append("scrolls_enabled")
+            
+        if outbound_clicks_enabled is not None:
+            settings.outbound_clicks_enabled = outbound_clicks_enabled
+            update_fields.append("outbound_clicks_enabled")
+            
+        if site_search_enabled is not None:
+            settings.site_search_enabled = site_search_enabled
+            update_fields.append("site_search_enabled")
+            
+        if video_engagement_enabled is not None:
+            settings.video_engagement_enabled = video_engagement_enabled
+            update_fields.append("video_engagement_enabled")
+            
+        if file_downloads_enabled is not None:
+            settings.file_downloads_enabled = file_downloads_enabled
+            update_fields.append("file_downloads_enabled")
+            
+        if page_changes_enabled is not None:
+            settings.page_changes_enabled = page_changes_enabled
+            update_fields.append("page_changes_enabled")
+            
+        if form_interactions_enabled is not None:
+            settings.form_interactions_enabled = form_interactions_enabled
+            update_fields.append("form_interactions_enabled")
+            
+        if search_query_parameter is not None:
+            settings.search_query_parameter = search_query_parameter
+            update_fields.append("search_query_parameter")
+            
+        if uri_query_parameter is not None:
+            settings.uri_query_parameter = uri_query_parameter
+            update_fields.append("uri_query_parameter")
+        
+        # Check if any fields were provided
+        if not update_fields:
+            return json.dumps({"error": "No fields provided to update"})
+        
+        # Create field mask
+        field_mask = FieldMask(paths=update_fields)
+        
+        # Create request
+        request = UpdateEnhancedMeasurementSettingsRequest(
+            enhanced_measurement_settings=settings,
+            update_mask=field_mask
+        )
+        
+        # Make the request
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None, 
+            utils.admin_client.update_enhanced_measurement_settings, 
+            request
+        )
+        
+        # Format response manually
+        result = {
+            "name": response.name,
+            "property_id": property_id,
+            "data_stream_id": data_stream_id,
+            "stream_enabled": response.stream_enabled,
+            "scrolls_enabled": response.scrolls_enabled,
+            "outbound_clicks_enabled": response.outbound_clicks_enabled,
+            "site_search_enabled": response.site_search_enabled,
+            "video_engagement_enabled": response.video_engagement_enabled,
+            "file_downloads_enabled": response.file_downloads_enabled,
+            "page_changes_enabled": response.page_changes_enabled,
+            "form_interactions_enabled": response.form_interactions_enabled,
+            "search_query_parameter": response.search_query_parameter,
+            "uri_query_parameter": response.uri_query_parameter,
+            "updated_fields": update_fields
+        }
+        
+        return json.dumps(result, indent=2)
+        
+    except Exception as e:
+        logger.error(f"Error updating enhanced measurement settings: {e}")
+        return json.dumps({"error": f"Error updating enhanced measurement settings: {str(e)}"})

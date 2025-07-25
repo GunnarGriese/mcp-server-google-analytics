@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from google.protobuf import message as proto
 from google.oauth2 import service_account
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
-from google.analytics.admin_v1beta import AnalyticsAdminServiceClient
+from google.analytics.admin_v1alpha import AnalyticsAdminServiceClient
 
 # Configure logging
 logger = logging.getLogger(__name__)
